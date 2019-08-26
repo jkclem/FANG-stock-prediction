@@ -1,0 +1,499 @@
+---
+title: 'Predicting FANG Stock Prices: Modeling cointegrated time series data using VECMs'
+output:
+  HTML:
+    code_folding: hide
+---
+
+Financial data is the best known resource for time series data. Records of stock prices have been meticulously recorded for over a century providing rich data sets. The stocks of the so-called 'FANG' companies, Facebook, Amazon, Netflix, and Google/Alphabet, have gotten a lot of attention for their impressive returns and the 'cool' factor of these high-tech companies. But are these stocks truly related to each other? Or is this an example of Wall Street marketing a bundle of unrelated goods (see BRICS)? It's also possible that the perception that they are related by investors is enough to cause their stocks to move together. Even if we can't tell why they move together if they do, we can at least determine if they move together.
+
+To find out, I got data from Yahoo Finance for the closing prices of the FANG stocks. Facebook's IPO was in 2012, so it was the limiting factor in terms of sample period. Our sample period goes from May 18, 2012 to August 23, 2019. I cut off all the trading days in 2019 as a testing data set and left the remaining observations for the training data set. This means the data set lacks data for how these companies' stocks acted in a recession. Regardless, I proceeded with my analysis. I tested for degree of integration, Granger causality, and Johansen integration. Based on the results, I proceeded with vector error correction modeling (VECM), which is a technique for simultaneously estimating multiple time series with at least 1 cointegrated relationship.
+
+```{r warning=FALSE}
+# for time series plotting
+suppressMessages(library(htmlwidgets))
+suppressMessages(library(webshot))
+suppressMessages(library(xts))
+suppressMessages(library(dygraphs))
+# for dataframe manipulation
+suppressMessages(library(dplyr))
+# for VEC modeling
+suppressMessages(library(tsDyn))
+# for the ACF plot
+suppressMessages(library(forecast))
+# for the ADF-test
+suppressMessages(library(aTSA))
+# for the Granger causality test
+suppressMessages(library(lmtest))
+# for the Johansen Cointegration test
+suppressMessages(library(urca))
+
+# loads in the data
+fb = read.csv('FB.csv')
+amzn = read.csv('AMZN.csv')
+nflx = read.csv('NFLX.csv')
+googl = read.csv('GOOGL.csv')
+
+# converts the Date columns to Date objects
+fb = fb %>%
+   mutate(Date = as.Date(Date, format = '%Y-%m-%d'))
+amzn = amzn %>%
+   mutate(Date = as.Date(Date, format = '%Y-%m-%d'))
+nflx = nflx %>%
+   mutate(Date = as.Date(Date, format = '%Y-%m-%d'))
+googl = googl %>%
+   mutate(Date = as.Date(Date, format = '%Y-%m-%d'))
+
+# creates a dataframe combining fb and aapl by the Date column
+fa = inner_join(fb, amzn, by = 'Date', suffix = c('.fb', '.amzn'))
+# creates a dataframe combining nflx and googl by the Date column
+ng = inner_join(nflx, googl, by = 'Date', suffix = c('.nflx', '.googl'))
+# combines them into 1 dataframe
+fang = inner_join(fa, ng, by = 'Date')
+
+# creates training and testing data sets with only closing prices
+train = fang %>%
+  filter(Date < '2019-01-01') %>%
+  dplyr::select(Date, starts_with('Close.'))
+test = fang %>%
+  filter(Date >= '2019-01-01')%>%
+  dplyr::select(Date, starts_with('Close.'))
+```
+
+```{r message=FALSE}
+# attaches the indicies dataframe so I don't need to keep typing fang$ before a column name
+attach(fang)
+
+# plots the indices with the htmlwidget dygraphs
+# dygraph() needs xts time series objects
+fb_xts <- xts(Close.fb, order.by = fang$Date, frequency = 365)
+amzn_xts <- xts(Close.amzn, order.by = fang$Date, frequency = 365)
+nflx_xts <- xts(Close.nflx, order.by = fang$Date, frequency = 365)
+googl_xts <- xts(Close.googl, order.by = fang$Date, frequency = 365)
+# creates a combined xts object
+fang_xts <- cbind(fb_xts, amzn_xts, nflx_xts, googl_xts)
+# plots the indices 
+ts_graph = dygraph(fang_xts, ylab = 'Closing Share Price', 
+        main = 'Closing Share Prices of FANG stocks') %>%
+  dySeries('fb_xts', label = 'FB') %>%
+  dySeries('amzn_xts', label = 'AMZN') %>%
+  dySeries('nflx_xts', label = 'NFLX') %>%
+  dySeries('googl_xts', label = 'GOOGL') %>%
+  dyOptions(colors = c('blue', 'orange', 'red', 'green'))
+
+# save html to png
+saveWidget(ts_graph, "temp.html", selfcontained = FALSE)
+width<- 1080
+height <- 610
+webshot("temp.html", file = "Rplot.png",
+        cliprect = c(10,30,width+50,height+50)
+        ,vwidth = width, vheight = height )
+```
+
+
+# **Testing for Stationarity**
+
+Stationarity is where the mean an variance of a time series is not dependent on time. When graphed, it looks like white noise. Due to several problems caused by modeling non-stationary time series, chiefly autocorrelation, you need to check if a time-series is stationary prior to modeling. If it is not stationary, you need to get it there through differencing.
+
+A glance at the graph above shows 4 time series that definitely look non-stationary. However, we need to formally test for it before proceeding.
+
+The plots of the Auto-Correlation Functions (ACFs) of the non-differenced variables show that stocks are definitely not stationary. The ACFs of the differenced variables look potentially stationary. This suggests each stock is integrated I(1). Augmented Dickey-Fuller (ADF) tests can confirm this.
+
+
+### **Auto-Correlation Function Plots for Facebook**
+
+```{r message=FALSE}
+# attaches the indicies dataframe so I don't need to keep typing train$ before a column name
+attach(train)
+
+Acf(Close.fb, lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+
+```{r}
+Acf(diff(Close.fb), lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+### **Auto-Correlation Function Plots for Amazon**
+
+```{r}
+Acf(Close.amzn, lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+
+```{r}
+Acf(diff(Close.amzn), lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+### **Auto-Correlation Function Plots for Netflix**
+
+```{r}
+Acf(Close.nflx, lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+```{r}
+Acf(diff(Close.nflx), lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+### **Auto-Correlation Function Plots for Google**
+
+```{r}
+Acf(Close.googl, lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+
+```{r}
+Acf(diff(Close.googl), lag.max = NULL, type = c("correlation", "covariance",
+  "partial"), plot = TRUE, na.action = na.contiguous, demean = TRUE)
+```
+
+
+The output of the ADF tests for the non-differenced and differenced strongly support the hypothesis that the stocks are integrated I(1). These stock prices need to be differenced once prior to modeling. Many time series packages for integrated time series models do this automatically.
+
+### **Augmented Dickey-Fuller Tests for Facebook**
+
+```{r}
+adf.test(Close.fb, output = TRUE)
+```
+
+
+```{r}
+adf.test(diff(Close.fb), output = TRUE)
+```
+
+### **Augmented Dickey-Fuller Tests for Amazon**
+
+```{r}
+adf.test(Close.amzn, output = TRUE)
+```
+
+
+```{r}
+adf.test(diff(Close.amzn), output = TRUE)
+```
+
+### **Augmented Dickey-Fuller Tests for Netflix**
+
+```{r}
+adf.test(Close.nflx, output = TRUE)
+```
+
+
+```{r}
+adf.test(diff(Close.nflx), output = TRUE)
+```
+
+### **Augmented Dickey-Fuller Tests for Google**
+
+```{r}
+adf.test(Close.googl, output = TRUE)
+```
+
+
+```{r}
+adf.test(diff(Close.googl), output = TRUE)
+```
+
+# **Granger Causality**
+
+Establishing causality in observational data is notoriously difficult. Granger causality is a lower bar. It simply says that if previous values of X can predict future values of y, then X Granger causes y. It is performed by estimating the regression of the lagged values of X on y and performing an F-test. If the p-value is small enough, you reject the null hypothesis that all the coefficients of the lagged values of X are 0. In plain English, small p-values say that the lagged Xs have predictive power on future y, with a corresponding level of confidence.
+
+The output below simply states that each of the FANG stocks has predictive power over the others. This means simultaneous modeling is a good approach.
+
+```{r}
+# creates a list of the FANG closing share prices to be looped through
+fang_list = list(Close.fb, Close.amzn, Close.nflx, Close.googl)
+# creates a counter that will be used for removing the ith object from fang_list using it as an index
+counter = 1
+# loops through fang_list
+for(i in fang_list){
+  # creates a temporary list
+  temp = fang_list
+  # removes the closing share prices of the ith stock
+  temp[[counter]] <- NULL
+  # loops through temp, which is fang_list minus i
+  for(j in temp){
+    # performs a Granger Causality Test of i's ability to predict j
+    print(grangertest(i, j, order = 30))
+  }
+  # increments the counter
+  counter = counter + 1
+}
+```
+
+
+# **Testing for Cointegration**
+
+Cointegration is a word I've thrown around several times. It simply means that there is a long-run relationship between at least 2 of our stocks. The test for cointegration is known as the Johansen test, named for the statistician/econometrician that developed it. It can be formulated in 2 ways, the Trace test and the Maximum Eigenvalue test, which have different hypotheses. The details are fairly technical, so the tl;dr version of it is if the rank, r, of the long-run relationship matrix is 0 or equal to the number of time series being tested, there is no cointegration and a different modeling technique is appropriate. If r is greater than 0 and less than the number of time series, then there are r cointegrative relationships.
+
+From the output below, we can be very sure that there is greater than 0 cointegrative relationships, but we can not be sure at any reasonable level of statistical significance that there is more than 1 cointegrative relationship. Thus, we will assume there is one cointegrated relationship between the FANG stocks.
+
+```{r}
+johansen = ca.jo(data.frame(Close.fb, Close.amzn, Close.nflx, Close.googl), type = 'trace', K = 30, ecdet = 'trend', spec = 'longrun')
+summary(johansen)
+```
+
+# **Choosing the Number of Lags for the Model**
+
+To choose the number of lags to include in the final model, I took a small subset of my training data; the period starting from May 09, 2018 and going until the end of the year. That was the date that left 163 observations in the mini-testing data set, which was equal to the number of observations in the test data set. I then estimated the model with 1 to 30 lags on the mini-training data and then estimated the mini-testing data set with that model. I calculated the mean absolute percentage error (MAPE) for each stock and summed them up. I then selected the number of lags that minimized the summed MAPE of each stock. The number of lags minimizing the summed MAPE in this tuning data set is 5.
+
+```{r}
+# this chunk of code partitions the training data set to smaller training and testing data sets for the purposes of tuning the number
+# of lags included in the model
+
+# these create mini partitions
+tune_train = train %>%
+  filter(Date < '2018-05-09')
+tune_test = train %>%
+  filter(Date >= '2018-05-09')
+# creates an empty vector to store the sum of the MAPE of each stock with the VECM estimated with i lags
+total_error = c()
+# goes from i to 30, representing the max lags in the model
+for(i in seq(30)){
+  
+  # sets the number of lags
+  lags = i
+  
+  # estimates the VECM with i lags
+  vecmodel = VECM(data.frame(tune_train$Close.fb, tune_train$Close.amzn, tune_train$Close.nflx, tune_train$Close.googl), 
+                  lag = lags, r = 1, include = 'const', estim = '2OLS')
+
+
+  # the chunk of code below makes rolling predictions
+
+  # creates an empty dataframe to store predictions
+  predictions = data.frame()
+  # loops through the rows in the test data minus the last number of rows equal to the number of lags
+  for(row in seq(dim(test)[1] - lags)){
+    # creates a temporary test data set with the number of rows equal to the number of lags + 1, because the data will be differenced
+    temp_test = tune_test[row:(row + lags),] %>%
+      # removes Date because the predict function can only intake actual variables of interest
+      dplyr::select(-Date)
+    # appends the predictions
+    predictions = rbind(predictions, data.frame(predict(vecmodel, newdata = temp_test, n.ahead = 1)))
+  }
+
+  # grabs the dates from the testing data set that we made predictions for
+  Date = tail(test, dim(predictions)[1])$Date
+  # attaches the Dates to the predictions
+  predictions = cbind(predictions, Date)
+  # joins actual and predicted values
+  tune_testing = inner_join(predictions, tail(test, dim(predictions)[1]), by = 'Date', suffix = c('.hat', '.actual'))
+  # creates a dataframe that
+  model_error = data.frame()
+  # initializes mape
+  mape_list = c()
+
+  # loops through the stocks
+  for(j in list('Close.fb', 'Close.amzn', 'Close.nflx', 'Close.googl')){
+    # selects the fitted and actual values for each stock
+    temp = tune_testing %>%
+      dplyr::select(contains(j))
+    
+    # calculates the absolue percent difference from the actual share price
+    perc_diff = abs((temp[,2] - temp[,1]) / temp[,2]) 
+    # sums the percent differences and divides by the number of rows in the testing data set and multiplies it by 100%
+    mape = 100 * sum(perc_diff) / dim(temp)[1]
+    # adds the mape to the mape list
+    mape_list = c(mape_list, mape)
+  }
+  # appends the sum of the mapes to the total error vector
+  total_error = c(total_error, sum(mape_list))
+}
+# returns the index of the lowest value, which is the number of lags producing the smallest sum of MAPE's of each stock
+which.min(total_error)
+```
+
+
+# **How Accurate is the Model?**
+
+When assessing model accuracy, it helps to have a baseline comparison. For classification, it could be the misclassification rate of always predicting the mode. For cross-sectional regression, it can be the average value of the dependent variable. For time series, I like to have my prediction be the value from the previous period of time. That means my baseline accuracy rating is the accuracy of saying the stock price tomorrow will be the stock price today.
+
+Doing this produces a baseline MAPE of 1.36% for Facebook, 1.20% for Amazon, 1.70% for Netflix, and 1.15% for Google. That's not too bad for a prediction method that doesn't rely on complicated statistical models. Can the VECM outperform this?
+
+```{r message=FALSE}
+# this chunk of code prints out the MAPE for just predicting the stocks price with the price the period before
+
+suppressMessages(attach(test))
+
+baseline = data.frame(lag(Close.fb))
+baseline = cbind(baseline, lag(Close.amzn))
+baseline = cbind(baseline, lag(Close.nflx))
+baseline = cbind(baseline, lag(Close.googl))
+Date = test$Date
+baseline = cbind(baseline, Date)
+
+baseline = inner_join(baseline, test, by = 'Date')
+
+baseline = baseline %>%
+  na.omit()
+
+for(i in list('Close.fb', 'Close.amzn', 'Close.nflx', 'Close.googl')){
+  temp = baseline %>%
+    filter(Date >= baseline$Date[1]) %>%
+    dplyr::select(contains(i))
+  actual = temp[,2]
+  fitted = temp[,1]
+  perc_diff = abs((actual - fitted) / actual)
+  mape = 100 * sum(perc_diff) / dim(temp)[1]
+  print(i)
+  print(mape)
+}
+```
+
+Yes. The VECM produces a MAPE of 0.30% for Facebook, 0.28% for Amazon, 0.40% for Netflix, and 0.29% for Google, which isn't too shabby. These MAPE's are roughly a quarter of the baseline error rates.
+
+```{r message=FALSE}
+suppressMessages(attach(train))
+
+# sets the number of lags
+lags = which.min(total_error)
+# estimates the VECM with 1 lag and 1 cointegrating relationship
+vecmodel = VECM(data.frame(Close.fb, Close.amzn, Close.nflx, Close.googl), lag = lags, r = 1, include = 'const', estim = '2OLS')
+
+
+# the chunk of code below makes rolling predictions
+
+# creates an empty dataframe to store predictions
+predictions = data.frame()
+# loops through the rows in the test data minus the last number of rows equal to the number of lags
+for(row in seq(dim(test)[1] - lags)){
+  # creates a temporary test data set with the number of rows equal to the number of lags + 1, because the data will be differenced
+  temp_test = test[row:(row + lags),] %>%
+    # removes Date because the predict function can only intake actual variables of interest
+    dplyr::select(-Date)
+  # appends the predictions
+  predictions = rbind(predictions, data.frame(predict(vecmodel, newdata = temp_test, n.ahead = 1)))
+}
+
+# grabs the dates from the testing data set that we made predictions for
+Date = tail(test, dim(predictions)[1])$Date
+
+# attaches the Dates to the predictions
+predictions = cbind(predictions, Date)
+# joins actual and predicted values
+testing = inner_join(predictions, tail(test, dim(predictions)[1]), by = 'Date', suffix = c('.hat', '.actual'))
+
+# this chunk of code prints out the MAPE of the forecast for each stock
+for(i in list('Close.fb', 'Close.amzn', 'Close.nflx', 'Close.googl')){
+  temp = testing %>%
+    dplyr::select(starts_with(i))
+  actual = temp[,2]
+  fitted = temp[,1]
+  perc_diff = abs((actual - fitted) / actual)
+  mape = 100 * sum(perc_diff) / dim(temp)[1]
+  print(i)
+  print(mape)
+}
+```
+
+Plotting the predicted and actual closing share prices of each stock show that the predicted stock prices stick very close to the actual stock prices. Because of the differences in scales of the stock prices, each stock gets their own graph to better see the fitted and predicted values.
+
+```{r message=FALSE}
+# attaches the indicies dataframe so I don't need to keep typing testing$ before a column name
+suppressMessages(attach(testing))
+
+# plots the indices with the htmlwidget dygraphs
+# dygraph() needs xts time series objects
+fb_hat_xts <- xts(Close.fb.hat, order.by = testing$Date, frequency = 365)
+amzn_hat_xts <- xts(Close.amzn.hat, order.by = testing$Date, frequency = 365)
+nflx_hat_xts <- xts(Close.nflx.hat, order.by = testing$Date, frequency = 365)
+googl_hat_xts <- xts(Close.googl.hat, order.by = testing$Date, frequency = 365)
+fb_act_xts <- xts(Close.fb.actual, order.by = testing$Date, frequency = 365)
+amzn_act_xts <- xts(Close.amzn.actual, order.by = testing$Date, frequency = 365)
+nflx_act_xts <- xts(Close.nflx.actual, order.by = testing$Date, frequency = 365)
+googl_act_xts <- xts(Close.googl.actual, order.by = testing$Date, frequency = 365)
+# creates a combined xts object
+test_xts <- cbind(fb_hat_xts, amzn_hat_xts, nflx_hat_xts, googl_hat_xts,
+                  fb_act_xts, amzn_act_xts, nflx_act_xts, googl_act_xts)
+```
+
+```{r message=FALSE}
+# plots the facebook stock
+ts_graph_fb = dygraph(cbind(test_xts$fb_hat_xts, test_xts$fb_act_xts), ylab = 'Closing Share Price', 
+        main = 'Closing Share Prices of FB') %>%
+  dySeries('fb_hat_xts', label = 'Fitted FB') %>%
+  dySeries('fb_act_xts', label = 'FB') %>%
+  dyOptions(colors = c('black', 'blue')) %>%
+  dyRangeSelector()
+
+# save html to png
+saveWidget(ts_graph_fb, "temp.html", selfcontained = FALSE)
+width<- 1080
+height <- 610
+webshot("temp.html", file = "Rplot.png",
+        cliprect = c(10,30,width+50,height+50)
+        ,vwidth = width, vheight = height )
+```
+
+```{r message=FALSE}
+# plots the amazon stock
+ts_graph_amzn = dygraph(cbind(test_xts$amzn_hat_xts, test_xts$amzn_act_xts), ylab = 'Closing Share Price', 
+        main = 'Closing Share Prices of AMZN') %>%
+  dySeries('amzn_hat_xts', label = 'Fitted AMZN') %>%
+  dySeries('amzn_act_xts', label = 'AMZN') %>%
+  dyOptions(colors = c('black', 'orange')) %>%
+  dyRangeSelector()
+
+# save html to png
+saveWidget(ts_graph_amzn, "temp.html", selfcontained = FALSE)
+width<- 1080
+height <- 610
+webshot("temp.html", file = "Rplot.png",
+        cliprect = c(10,30,width+50,height+50)
+        ,vwidth = width, vheight = height )
+```
+
+
+```{r message=FALSE}
+# plots the netflix stock
+ts_graph_nflx = dygraph(cbind(test_xts$nflx_hat_xts, test_xts$nflx_act_xts), ylab = 'Closing Share Price', 
+        main = 'Closing Share Prices of NFLX') %>%
+  dySeries('nflx_hat_xts', label = 'Fitted NFLX') %>%
+  dySeries('nflx_act_xts', label = 'NFLX') %>%
+  dyOptions(colors = c('black', 'red')) %>%
+  dyRangeSelector()
+
+# save html to png
+saveWidget(ts_graph_nflx, "temp.html", selfcontained = FALSE)
+width<- 1080
+height <- 610
+webshot("temp.html", file = "Rplot.png",
+        cliprect = c(10,30,width+50,height+50)
+        ,vwidth = width, vheight = height )
+```
+
+
+```{r message=FALSE}
+# plots the google stock
+ts_graph_googl = dygraph(cbind(test_xts$googl_hat_xts, test_xts$googl_act_xts), ylab = 'Closing Share Price', 
+        main = 'Closing Share Prices of GOOGLE') %>%
+  dySeries('googl_hat_xts', label = 'Fitted GOOGL') %>%
+  dySeries('googl_act_xts', label = 'GOOGL') %>%
+  dyOptions(colors = c('black', 'green')) %>%
+  dyRangeSelector()
+
+# save html to png
+saveWidget(ts_graph_googl, "temp.html", selfcontained = FALSE)
+width<- 1080
+height <- 610
+webshot("temp.html", file = "Rplot.png",
+        cliprect = c(10,30,width+50,height+50)
+        ,vwidth = width, vheight = height )
+```
+
+
+# **Closing Thoughts**
+
+So this model performs well. What's the point? The model predicts closing share prices. So if the trading price dips well below the predicted closing share price, where well below is a function of the confidence interval and your risk tolerance, it would make sense to buy the stock and sell it just before closing; provided there wasn't a good reason for a prolonged drop in share price. If the price went way above the predicted closing, it would make sense to sell it (**I am not giving financial advice. Just stating how I would use the model if I were inclined to do so.**). These actions only make sense if you are a day trader, but the insight of this model is limited because it is only forecasting one day ahead.
+
+The accuracy of the model does tell us that VEC modeling is appropriate for the FANG stocks. Reformluating the model to predict farther out in time to decide whether an option is correctly priced is a logical place to go from here. It is important to keep in mind predicting farther and farther out into the future is difficult. The error bands grow wider as one predicts further off in the future. Rigorous backtesting and the knowledge that past performance doesn't gaurantee future performance is key before implementing a trading strategy.
+
+I hope you learned a little about cointegrated time series and VEC modeling. There is a lot more to working with them not covered here, such as interpreting the long-run relationship matrix and the impulse response functions. I hope this blog sparks an interest for this type of data.
